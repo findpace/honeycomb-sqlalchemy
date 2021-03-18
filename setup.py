@@ -11,7 +11,7 @@ setup(
     author_email="tech@pacerevenue.com",
     url="http://github.com/findpace/honeycomb-sqlalchemy",
     py_modules=["honeycomb_sqlalchemy"],
-    install_requires=["beeline", "sqlalchemy"],
+    install_requires=["honeycomb-beeline", "sqlalchemy"],
     extras_require={"dev": ["coverage==5.5", "pytest==6.2.2"]},
     zip_safe=True,
     license="Apache License, Version 2.0",
