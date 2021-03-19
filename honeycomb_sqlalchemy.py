@@ -5,8 +5,8 @@ import threading
 import warnings
 
 import beeline
+from sqlalchemy import event
 from sqlalchemy.engine import Engine
-from sqlalchemy.event import listen
 
 
 log = logging.getLogger(__name__)
@@ -26,9 +26,17 @@ class SqlalchemyListeners(object):
 
         self.installed = True
 
-        listen(Engine, "before_cursor_execute", self.before_cursor_execute)
-        listen(Engine, "after_cursor_execute", self.after_cursor_execute)
-        listen(Engine, "handle_error", self.handle_error)
+        event.listen(Engine, "before_cursor_execute", self.before_cursor_execute)
+        event.listen(Engine, "after_cursor_execute", self.after_cursor_execute)
+        event.listen(Engine, "handle_error", self.handle_error)
+
+    def uninstall(self):
+
+        event.remove(Engine, "before_cursor_execute", self.before_cursor_execute)
+        event.remove(Engine, "after_cursor_execute", self.after_cursor_execute)
+        event.remove(Engine, "handle_error", self.handle_error)
+
+        self.installed = False
 
     def reset_state(self):
         self.state.span = None
@@ -37,7 +45,10 @@ class SqlalchemyListeners(object):
     def before_cursor_execute(
         self, conn, cursor, statement, parameters, context, executemany
     ):
-        if self.state.span is not None or self.state.query_start_time is not None:
+        span = getattr(self.state, "span", None)
+        query_start_time = getattr(self.state, "query_start_time", None)
+
+        if span or query_start_time:
             warnings.warn(
                 "The before_cursor_execute event fired multiple times inside the same "
                 "thread, without a corresponding after_cursor_execute or handle_error "

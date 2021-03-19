@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
+import threading
+import time
 from datetime import datetime, timedelta
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 import pytest
 from honeycomb_sqlalchemy import SqlalchemyListeners
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 
 @pytest.fixture
@@ -38,8 +44,8 @@ def now():
 class TestInstall:
     @pytest.fixture
     def sqlalchemy_listen(self):
-        with patch("honeycomb_sqlalchemy.listen") as patched:
-            yield patched
+        with patch("honeycomb_sqlalchemy.event") as patched:
+            yield patched.listen
 
     def test_listeners(self, sqlalchemy_listen):
         listeners = SqlalchemyListeners()
@@ -260,3 +266,87 @@ class TestHandleError:
         listeners.handle_error(context)
 
         assert listeners.reset_state.called
+
+
+class TestIntegration:
+    @pytest.fixture
+    def db(self):
+        engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+        )
+
+        @event.listens_for(engine, "connect")
+        def sqlite_engine_connect(dbapi_conn, connection_record):
+            dbapi_conn.create_function("sleep", 1, time.sleep)
+
+        return scoped_session(sessionmaker(bind=engine))
+
+    @pytest.fixture
+    def listeners(self):
+        listeners = SqlalchemyListeners()
+        listeners.install()
+        yield
+        listeners.uninstall()
+
+    def test_success(self, listeners, beeline, db):
+
+        db.execute("SELECT 1")
+
+        assert beeline.start_span.call_args_list == [
+            call(
+                context={
+                    "name": "sqlalchemy_query",
+                    "type": "db",
+                    "db.query": "SELECT 1",
+                    "db.query_args": [],
+                }
+            )
+        ]
+        assert beeline.finish_span.call_args_list == [
+            call(beeline.start_span.return_value)
+        ]
+        assert beeline.add_context.call_args_list == [
+            call(
+                {"db.duration": ANY, "db.last_insert_id": ANY, "db.rows_affected": ANY}
+            )
+        ]
+
+    def test_error(self, listeners, beeline, db):
+
+        with pytest.raises(OperationalError):
+            db.execute(f"SELECT doesnotexist")
+
+        assert beeline.start_span.call_args_list == [
+            call(
+                context={
+                    "name": "sqlalchemy_query",
+                    "type": "db",
+                    "db.query": "SELECT doesnotexist",
+                    "db.query_args": [],
+                }
+            )
+        ]
+        assert beeline.finish_span.call_args_list == [
+            call(beeline.start_span.return_value)
+        ]
+        assert beeline.add_context_field.call_args_list == [call("db.error", ANY)]
+
+    def test_concurrent_calls(self, listeners, beeline, db):
+        def query(seconds):
+            db.execute(f"SELECT sleep({seconds})")
+            db.commit()
+
+        t1 = threading.Thread(target=query, args=(0.1,))
+        t2 = threading.Thread(target=query, args=(0.05,))
+
+        t1.start()
+        time.sleep(0.07)  # second query starts before first finishes
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert beeline.add_context.call_count == 2
+        (call1_args, _), (call2_args, _) = beeline.add_context.call_args_list
+
+        assert int(call1_args[0]["db.duration"] / 10) == 10  # ~0.1 seconds
+        assert int(call2_args[0]["db.duration"] / 10) == 5  # ~0.05 seconds
