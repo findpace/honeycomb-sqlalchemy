@@ -20,6 +20,19 @@ jobs:
           - 3.8
           - 3.9
 
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_PASSWORD: password
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
     - name: checkout
       uses: actions/checkout@v2
@@ -35,6 +48,8 @@ jobs:
         pip install tox tox-gh-actions
     - name: test with tox
       run: tox
+      env:
+        PG_HOST: postgres
 
     - name: generate distributables
       run: |

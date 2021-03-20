@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -6,11 +7,10 @@ from unittest.mock import ANY, Mock, call, patch
 
 import pytest
 from honeycomb_sqlalchemy import SqlalchemyListeners
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import scoped_session, sessionmaker
-from sqlalchemy.pool import StaticPool
 
 
 @pytest.fixture
@@ -272,13 +272,12 @@ class TestIntegration:
     @pytest.fixture
     def db(self):
         engine = create_engine(
-            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+            f"postgresql://"
+            f"{os.environ.get('PG_USER', 'postgres')}:"
+            f"{os.environ.get('PG_PASS', 'password')}@"
+            f"{os.environ.get('PG_HOST', 'localhost')}/"
+            f"{os.environ.get('PG_DB', 'postgres')}"
         )
-
-        @event.listens_for(engine, "connect")
-        def sqlite_engine_connect(dbapi_conn, connection_record):
-            dbapi_conn.create_function("sleep", 1, time.sleep)
-
         return scoped_session(sessionmaker(bind=engine))
 
     @pytest.fixture
@@ -313,8 +312,8 @@ class TestIntegration:
 
     def test_error(self, listeners, beeline, db):
 
-        with pytest.raises(OperationalError):
-            db.execute(f"SELECT doesnotexist")
+        with pytest.raises(ProgrammingError):
+            db.execute("SELECT doesnotexist")
 
         assert beeline.start_span.call_args_list == [
             call(
@@ -333,7 +332,7 @@ class TestIntegration:
 
     def test_concurrent_calls(self, listeners, beeline, db):
         def query(seconds):
-            db.execute(f"SELECT sleep({seconds})")
+            db.execute(f"SELECT pg_sleep({seconds})")
             db.commit()
 
         t1 = threading.Thread(target=query, args=(0.1,))
